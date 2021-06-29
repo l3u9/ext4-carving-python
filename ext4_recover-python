@@ -1,0 +1,343 @@
+jpg = b"\xff\xd8"
+png = b'\x49\x45\x4E\x44\xAE\x42\x60\x82'
+gif = b"\x47\x49\x46\x38\x39\x61"
+
+superblock_start = 0x4400
+
+def get_file(filename):
+    f = open(filename, "rb")
+
+    return f
+
+def get_log_block_size(f):
+    f.seek(superblock_start + 0x18)
+    log_block_size = f.read(4)
+    log_block_size = int.from_bytes(log_block_size, byteorder='little', signed=False)
+    log_block_size = log_block_size * log_block_size
+    return log_block_size
+
+def get_inode_per_group(f):
+    f.seek(superblock_start + 0x18 + 0x10)
+    inodes_per_group = f.read(4)
+    inodes_per_group = int.from_bytes(inodes_per_group, byteorder='little', signed=False)
+    
+    return inodes_per_group
+
+def get_group_descripter(f):
+
+    log_block_size = get_log_block_size(f)
+    Group_descriptor = superblock_start + 1024 * (log_block_size - 1)
+    
+    return Group_descriptor
+
+def get_inode_size(f):
+    f.seek(superblock_start + 0x18 + 0x10 + 0x30)
+    inode_size = f.read(2)
+    inode_size = int.from_bytes(inode_size, byteorder='little', signed=False)
+
+    return inode_size
+
+def get_inode_table_addr(f,Group_descriptor,inode_table_idx, inode_idx):
+    log_block_size = get_log_block_size(f)
+    inode_size = get_inode_size(f)
+#    Group_descriptor = get_group_descripter(f)
+    Group_descriptor += (0x20 * (inode_table_idx))
+    f.seek(Group_descriptor + 0x8) #bg_inode_table_lo
+    inode_table_addr = f.read(4)
+    inode_table_addr = int.from_bytes(inode_table_addr, byteorder="little", signed=False)
+    inode_table_addr = inode_table_addr * 1024 * log_block_size + 4096 * inode_size 
+
+    return inode_table_addr + (0x100 * (inode_idx-1))
+
+def get_inode_block_offset(f, inode_table_addr):
+    f.seek(inode_table_addr)
+    
+    data = f.read(0x100)
+    
+    offset_magic = data.find(bytes.fromhex("0af3")) #inode table의 시그니처? magic값
+    #print(offset_magic)
+    
+    inode_magic = inode_table_addr + offset_magic
+
+    inode_block_offset = inode_magic + 0x14
+
+    return inode_block_offset
+
+def get_root(f, inode_block_offset, log_block_size, inode_size):
+    f.seek(inode_block_offset)
+    
+    inode_block = f.read(4)
+    inode_block = int.from_bytes(inode_block, byteorder='little', signed = False)
+    #print(hex(inode_block))
+    root = inode_block * 1024 * log_block_size + 4096 * inode_size
+    return root
+
+    
+
+    
+
+
+def get_root_directory_list(f, inode_table_idx, inode_idx):
+    folder_list = []
+    file_list = []
+    #with open(filename, "rb") as f:
+    #f.seek(0,2)
+
+    log_block_size = get_log_block_size(f)
+    
+    inodes_per_group = get_inode_per_group(f)
+    #print(inodes_per_group)
+
+    inode_size = get_inode_size(f)
+    #print(hex(inode_size))
+
+    Group_descriptor = get_group_descripter(f)
+    # print(hex(Group_descriptor))
+
+
+    inode_table_addr = get_inode_table_addr(f,Group_descriptor,inode_table_idx= inode_table_idx,inode_idx=inode_idx)
+    
+    # print("inode_table_addr:",hex(inode_table_addr)) #fist inode table = root
+    
+    
+    inode_block_offset = get_inode_block_offset(f,inode_table_addr)
+    # print("inode_block_offset:",hex(inode_block_offset))
+
+    f.seek(inode_block_offset)
+    
+    inode_block = f.read(2)
+    inode_block = int.from_bytes(inode_block, byteorder='little', signed = False)
+    #print(hex(inode_block))
+    root = get_root(f,inode_block_offset, log_block_size, inode_size)
+
+    #print(hex(root))
+
+    first_name_len = root + 0x18 #lost+found의 name_len이 들어있는 주소
+
+    f.seek(first_name_len)
+
+    while True:
+        data_info = f.read(4)
+        data_info = int.from_bytes(data_info, byteorder='little', signed=False)
+        #print(data_info)
+
+        group_descriptor_idx = (data_info - 1) // inodes_per_group
+        inode_idx = data_info % inodes_per_group
+        f.read(2)
+        file_name_info = f.read(2)
+        name_len = file_name_info[0]
+        #print("name_len:",name_len)
+        file_type = file_name_info[1]
+        #print("filetype:",file_type)
+
+        if name_len == 0: #파일 이름의 길이가 0이면 파일이 더이상 존재하지 않다고 생각하여 break
+            break
+
+        #print("name_len:",name_len)
+
+        name = f.read(name_len)
+        #print("name:",name)
+
+        if name_len % 4 != 0:
+            mov = 4 - (name_len % 4) #파일 이름이 4바이트 단위로 주소에 들어가는 것을 확인하고 4바이트에 맞게 주소 이동
+            #print(mov)
+            f.read(mov)
+
+        if file_type == 0x2:
+            folderinfo = [name, group_descriptor_idx, inode_idx]
+            folder_list.append(folderinfo)
+        else:
+            fileinfo = [name, group_descriptor_idx, inode_idx]
+            file_list.append(fileinfo)            
+
+
+    return file_list, folder_list
+
+
+def recover_file(f,filename, inode_table_idx,inode_idx):
+    log_block_size = get_log_block_size(f)
+    
+    inodes_per_group = get_inode_per_group(f)
+    #print(inodes_per_group)
+
+    inode_size = get_inode_size(f)
+    #print(hex(inode_size))
+
+    Group_descriptor = get_group_descripter(f)
+    # print(hex(Group_descriptor))
+
+
+    inode_table_addr = get_inode_table_addr(f,Group_descriptor,inode_table_idx= inode_table_idx,inode_idx=inode_idx)
+    
+    # print("inode_table_addr:",hex(inode_table_addr)) #fist inode table = root
+    
+    
+    inode_block_offset = get_inode_block_offset(f,inode_table_addr)
+    # print("inode_block_offset:",hex(inode_block_offset))
+
+    f.seek(inode_block_offset)
+    
+    inode_block = f.read(2)
+    inode_block = int.from_bytes(inode_block, byteorder='little', signed = False)
+    #print(hex(inode_block))
+    root = get_root(f,inode_block_offset, log_block_size, inode_size)
+    
+    # print("root:",hex(root))
+
+    f.seek(root)
+    jpg_header = f.read(2)
+
+    f.seek(root)
+    png_header = f.read(8)
+
+    f.seek(root)
+    gif_header = f.read(6)
+    
+
+
+    if jpg_header == jpg:
+        recover_jpg(f, filename,root)
+    elif png_header == png:
+        recover_png(f, filename, root)
+    elif gif_header == gif:
+        recover_gif(f, filename, root)
+    else:
+        recover_text(f,filename, root)
+
+        
+
+    
+
+def recover_jpg(f, filename,root):
+    i = 0
+    while True:
+        f.seek(root + i)
+
+        footer = f.read(8)
+
+        if footer == b"\xff\xd9\x00\x00\x00\x00\x00\x00":
+            break
+        i += 1
+    i += 4
+    f.seek(root)
+
+    data = f.read(i)
+    
+    recover = open(filename, "wb")
+    recover.write(data)
+
+
+def recover_png(f, filename,root):
+    i = 0
+    while True:
+        f.seek(root + i)
+
+        footer = f.read(8)
+
+        if footer == b"\x49\x45\x4E\x44\xAE\x42\x60\x82":
+            break
+        i += 1
+    i += 8
+    f.seek(root)
+
+    data = f.read(i)
+    
+    recover = open(filename, "wb")
+    recover.write(data)
+
+def recover_gif(f, filename,root):
+    i = 0
+    while True:
+        f.seek(root + i)
+
+        footer = f.read(8)
+
+        if footer == b"\x00\x3b\x00\x00\x00\x00\x00\x00":
+            break
+        i += 1
+    i += 4
+    f.seek(root)
+
+    data = f.read(i)
+    
+    recover = open(filename, "wb")
+    recover.write(data)
+
+def recover_text(f, filename, root):
+    i = 0
+    while True:
+        f.seek(root + i)
+
+        footer = f.read(4)
+
+        if footer == b"\x00\x00\x00\x00":
+            break
+        i += 1
+    i += 4
+    f.seek(root)
+
+    data = f.read(i)
+    
+    recover = open(filename, "wb")
+    recover.write(data)
+
+
+
+
+filename = input("input filename\n")
+
+f = get_file(filename)
+
+folder_list = []
+
+root_file_list, root_folder_list = get_root_directory_list(f, inode_table_idx=0, inode_idx=2)
+
+
+
+for fold in root_folder_list:
+    root_file, root_folder = get_root_directory_list(f, fold[1], fold[2])
+    root_file_list += root_file
+
+    if len(root_folder) != 0:
+        root_folder_list += root_folder
+    
+
+
+'''
+test = root_folder_list[1]
+root_file, root_folder = get_root_directory_list(f, test[1], test[2])
+
+root_folder = root_folder[1:]
+
+
+
+root_file_list += root_file
+'''
+
+if len(folder_list) != 0:
+    for fold in root_folder_list:
+        root_file, root_folder = get_root_directory_list(f, fold[1], fold[2])
+        root_file_list += root_file
+
+        if len(root_folder) != 0:
+            root_folder_list += root_folder
+
+
+print(root_file_list)
+print(root_folder_list)
+print(folder_list)
+
+for file in root_file_list:
+    recover_file(f, file[0],inode_table_idx=file[1], inode_idx=file[2])
+
+print("recovery Success!\n\n")
+    
+
+
+
+
+
+
+
+
+
