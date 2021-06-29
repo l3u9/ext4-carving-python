@@ -1,0 +1,88 @@
+
+def get_filenamelist(filename):
+    file_list = []
+    with open(filename, "rb") as f:
+        superblock_start = 0x4400
+        f.seek(0,2)
+
+        f.seek(superblock_start + 0x18)
+        log_block_size = f.read(4)
+        log_block_size = int.from_bytes(log_block_size, byteorder='little', signed=False)
+        log_block_size = log_block_size * log_block_size
+        #print(log_block_size)
+        
+        f.seek(superblock_start + 0x18 + 0x10)
+        inodes_per_group = f.read(4)
+        inodes_per_group = int.from_bytes(inodes_per_group, byteorder='little', signed=False)
+
+        f.seek(superblock_start + 0x18 + 0x10 + 0x30)
+        inode_size = f.read(2)
+        inode_size = int.from_bytes(inode_size, byteorder='little', signed=False)
+        #print(hex(inode_size))
+
+        Group_descriptor = superblock_start + 1024 * (log_block_size - 1)
+        
+        f.seek(Group_descriptor + 0x8) #bg_inode_table_lo
+        inode_table_addr = f.read(4)
+        inode_table_addr = int.from_bytes(inode_table_addr, byteorder="little", signed=False)
+        inode_table_addr = inode_table_addr * 1024 * log_block_size + 4096 * inode_size 
+        #print(hex(inode_table_addr)) #fist inode table = root
+        
+        f.seek(inode_table_addr)
+        
+        data = f.read(0x500)
+        
+        offset_magic = data.find(bytes.fromhex("0af3")) #inode table의 시그니처? magic값
+        #print(offset_magic)
+        
+        inode_magic = inode_table_addr + offset_magic
+
+        inode_block_offset = inode_magic + 0x14
+        
+        f.seek(inode_block_offset)
+        
+        inode_block = f.read(2)
+        inode_block = int.from_bytes(inode_block, byteorder='little', signed = False)
+        #print(hex(inode_block))
+        root = inode_block * 1024 * log_block_size + 4096 * inode_size
+
+        print(hex(root))
+
+        first_name_len = root + 0x1e #lost+found의 name_len이 들어있는 주소
+
+        f.seek(first_name_len)
+
+        while True:
+
+            name_len = f.read(2)[0]
+
+            if name_len == 0: #파일 이름의 길이가 0이면 파일이 더이상 존재하지 않다고 생각하여 break
+                break
+
+            #print("name_len:",name_len)
+
+            name = f.read(name_len)
+
+            if name_len % 4 != 0:
+                mov = 4 - (name_len % 4) #파일 이름이 4바이트 단위로 주소에 들어가는 것을 확인하고 4바이트에 맞게 주소 이동
+                #print(mov)
+                f.read(mov)
+
+            f.read(6)
+
+            file_list.append(name)
+    return file_list
+
+
+filename = input("input filename\n")
+
+
+filename_list = get_filenamelist(filename)
+
+print(filename_list)
+    
+    
+    
+
+
+
